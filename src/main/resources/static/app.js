@@ -1,124 +1,140 @@
-const API_URL = '/api/products';
+/* App entry point: hash router + dashboard view.
+   Routes:
+     #/dashboard           overview
+     #/products            product CRUD + barcode scan
+     #/suppliers           supplier CRUD
+     #/purchase-orders     PO list | /new | /:id | /:id/edit
+     #/grns                GRN list | /new[/:poId] | /:id
+*/
 
-const form = document.getElementById('product-form');
-const formTitle = document.getElementById('form-title');
-const idField = document.getElementById('product-id');
-const barcodeField = document.getElementById('barcode');
-const nameField = document.getElementById('name');
-const descriptionField = document.getElementById('description');
-const priceField = document.getElementById('price');
-const quantityField = document.getElementById('quantity');
-const cancelBtn = document.getElementById('cancel-btn');
-const tableBody = document.getElementById('product-table-body');
+/* ----------------------------------------------------------
+   Dashboard
+   ---------------------------------------------------------- */
+const DashboardView = {
 
-const scanInput = document.getElementById('scan-input');
-const scanStatus = document.getElementById('scan-status');
+  async render(container) {
+    container.innerHTML = `
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Dashboard</h1>
+          <p class="page-sub">Overview of your supermarket — products, suppliers and order flow.</p>
+        </div>
+        <div class="quick-actions">
+          <a class="btn btn-primary" href="#/purchase-orders/new">+ Purchase Order</a>
+          <a class="btn btn-secondary" href="#/grns/new">+ Goods Received</a>
+        </div>
+      </div>
+      <div id="dash-cards" class="summary-grid">${ui.loading('Loading dashboard...')}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:18px;margin-top:18px;">
+        <div class="card" id="dash-po-card">
+          <div class="card-pad"><h2 class="card-title">Recent purchase orders</h2><div id="dash-po">${ui.loading()}</div></div>
+        </div>
+        <div class="card" id="dash-grn-card">
+          <div class="card-pad"><h2 class="card-title">Recent goods received</h2><div id="dash-grn">${ui.loading()}</div></div>
+        </div>
+      </div>`;
 
-async function loadProducts() {
-  const res = await fetch(API_URL);
-  const products = await res.json();
-  tableBody.innerHTML = '';
-  products.forEach(p => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${p.barcode}</td>
-      <td>${p.name}</td>
-      <td>${p.description ?? ''}</td>
-      <td>${p.price}</td>
-      <td>${p.quantity}</td>
-      <td>
-        <button data-action="edit" data-id="${p.id}">Edit</button>
-        <button data-action="delete" data-id="${p.id}">Delete</button>
-      </td>`;
-    tableBody.appendChild(tr);
-  });
+    try {
+      const [products, suppliers, pos, grns] = await Promise.all([
+        ProductsView.loadProducts(),
+        SuppliersView.loadSuppliers(),
+        API.get('/api/purchase-orders'),
+        API.get('/api/grns'),
+      ]);
+
+      const activeSuppliers = suppliers.filter(s => s.active).length;
+      const awaiting = pos.filter(o => o.status === 'APPROVED' || o.status === 'PARTIALLY_RECEIVED').length;
+      const completed = pos.filter(o => o.status === 'RECEIVED').length;
+      const today = ui.todayInput();
+      const grnsToday = grns.filter(g => g.receivedDate === today).length;
+
+      const cards = [
+        { label: 'Products', value: products.length, cls: 'blue', sub: 'in catalogue' },
+        { label: 'Active Suppliers', value: activeSuppliers, cls: 'slate', sub: `${suppliers.length} total` },
+        { label: 'Purchase Orders', value: pos.length, cls: 'amber', sub: `${pos.filter(o => o.status === 'DRAFT' || o.status === 'PENDING').length} pending approval` },
+        { label: 'Awaiting Delivery', value: awaiting, cls: 'purple', sub: 'approved, not fully received' },
+        { label: 'Orders Completed', value: completed, cls: 'green', sub: 'fully received' },
+        { label: 'GRNs Today', value: grnsToday, cls: 'green', sub: `${grns.length} total receipts` },
+      ];
+
+      container.querySelector('#dash-cards').innerHTML = cards.map(c => `
+        <div class="stat-card ${c.cls}">
+          <div class="stat-label">${c.label}</div>
+          <div class="stat-value">${c.value}</div>
+          <div class="stat-sub">${c.sub}</div>
+        </div>`).join('');
+
+      container.querySelector('#dash-po').innerHTML = pos.length === 0
+        ? ui.empty('📋', 'No purchase orders yet', 'Create one to start the supplier workflow.', `<a class="btn btn-primary btn-sm" href="#/purchase-orders/new">+ Create Purchase Order</a>`)
+        : `<div class="table-wrap"><table class="table">
+            <thead><tr><th>PO</th><th>Supplier</th><th class="num">Total</th><th>Status</th></tr></thead>
+            <tbody>${pos.slice(0, 5).map(po => `
+              <tr>
+                <td><a class="cell-main" style="color:var(--primary);text-decoration:none;" href="#/purchase-orders/${po.id}">${ui.esc(po.poNumber)}</a></td>
+                <td>${ui.esc(po.supplier?.name || '—')}</td>
+                <td class="num strong">${ui.money(po.totalAmount)}</td>
+                <td>${ui.badge(po.status)}</td>
+              </tr>`).join('')}
+            </tbody></table></div>`;
+
+      container.querySelector('#dash-grn').innerHTML = grns.length === 0
+        ? ui.empty('📥', 'No goods received yet', 'Received stock will appear here.', `<a class="btn btn-secondary btn-sm" href="#/grns/new">+ Create GRN</a>`)
+        : `<div class="table-wrap"><table class="table">
+            <thead><tr><th>GRN</th><th>PO</th><th class="num">Received</th><th>Status</th></tr></thead>
+            <tbody>${grns.slice(0, 5).map(g => `
+              <tr>
+                <td><a class="cell-main" style="color:var(--primary);text-decoration:none;" href="#/grns/${g.id}">${ui.esc(g.grnNumber)}</a></td>
+                <td>${ui.esc(g.purchaseOrder?.poNumber || '—')}</td>
+                <td class="num strong">${g.totalReceivedQuantity}</td>
+                <td>${ui.badge(g.status)}</td>
+              </tr>`).join('')}
+            </tbody></table></div>`;
+    } catch (err) {
+      container.querySelector('#dash-cards').innerHTML =
+        `<div style="grid-column:1/-1;">${ui.empty('⚠️', 'Could not load dashboard', err.message || 'Unknown error')}</div>`;
+    }
+  },
+};
+
+/* ----------------------------------------------------------
+   Router
+   ---------------------------------------------------------- */
+const views = {
+  dashboard: DashboardView,
+  products: ProductsView,
+  suppliers: SuppliersView,
+  'purchase-orders': PurchaseOrdersView,
+  grns: GrnsView,
+};
+
+function parseHash() {
+  const hash = window.location.hash.replace(/^#\/?/, '');
+  const parts = hash.split('/').filter(Boolean);
+  return { view: parts[0] || 'dashboard', params: parts.slice(1) };
 }
 
-function resetForm() {
-  form.reset();
-  idField.value = '';
-  formTitle.textContent = 'Add product';
-  cancelBtn.hidden = true;
-}
+async function render() {
+  const { view, params } = parseHash();
+  const container = document.getElementById('app-view');
+  const current = views[view];
 
-function fillForm(product) {
-  idField.value = product.id;
-  barcodeField.value = product.barcode;
-  nameField.value = product.name;
-  descriptionField.value = product.description ?? '';
-  priceField.value = product.price;
-  quantityField.value = product.quantity;
-  formTitle.textContent = `Edit product #${product.id}`;
-  cancelBtn.hidden = false;
-}
+  document.querySelectorAll('.nav-link').forEach(a =>
+    a.classList.toggle('active', a.dataset.view === view));
+  window.scrollTo(0, 0);
 
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const payload = {
-    barcode: barcodeField.value.trim(),
-    name: nameField.value.trim(),
-    description: descriptionField.value.trim(),
-    price: parseFloat(priceField.value),
-    quantity: parseInt(quantityField.value, 10),
-  };
-
-  const id = idField.value;
-  const res = await fetch(id ? `${API_URL}/${id}` : API_URL, {
-    method: id ? 'PUT' : 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    alert(err.message || 'Request failed');
+  if (!current) {
+    container.innerHTML = ui.empty('🧭', 'Page not found',
+      'The page you are looking for does not exist.',
+      '<a class="btn btn-secondary" href="#/dashboard">Go to Dashboard</a>');
     return;
   }
 
-  resetForm();
-  loadProducts();
-});
-
-cancelBtn.addEventListener('click', resetForm);
-
-tableBody.addEventListener('click', async (e) => {
-  const btn = e.target.closest('button');
-  if (!btn) return;
-  const id = btn.dataset.id;
-
-  if (btn.dataset.action === 'edit') {
-    const res = await fetch(`${API_URL}/${id}`);
-    if (res.ok) fillForm(await res.json());
+  try {
+    await current.render(container, params);
+  } catch (err) {
+    container.innerHTML = ui.empty('⚠️', 'Something went wrong', err.message || 'Unexpected error');
   }
+}
 
-  if (btn.dataset.action === 'delete') {
-    if (!confirm('Delete this product?')) return;
-    await fetch(`${API_URL}/${id}`, { method: 'DELETE' });
-    loadProducts();
-  }
-});
-
-// USB barcode scanners behave like a keyboard: they type the code then send Enter.
-scanInput.addEventListener('keydown', async (e) => {
-  if (e.key !== 'Enter') return;
-  e.preventDefault();
-
-  const barcode = scanInput.value.trim();
-  scanInput.value = '';
-  if (!barcode) return;
-
-  const res = await fetch(`${API_URL}/barcode/${encodeURIComponent(barcode)}`);
-  if (res.ok) {
-    const product = await res.json();
-    fillForm(product);
-    scanStatus.textContent = `Found: ${product.name}`;
-    scanStatus.className = 'ok';
-  } else {
-    resetForm();
-    barcodeField.value = barcode;
-    scanStatus.textContent = 'Not found — fill in details to add it';
-    scanStatus.className = 'error';
-  }
-});
-
-loadProducts();
+window.addEventListener('hashchange', render);
+window.addEventListener('DOMContentLoaded', render);
